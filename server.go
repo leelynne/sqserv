@@ -42,12 +42,12 @@ type queue struct {
 	attributesToReturn []*string
 }
 
-func ListenAndServe(queues ...string) error {
-}
-
 // New creates a new SQSServer.
-// If the provided http.Handler is nil http.DefaultServeMux is used
+// If Handler is nil http.DefaultServeMux is used
 func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
+	if h == nil {
+		h = http.DefaultServeMux
+	}
 	return &SQSServer{
 			Handler:      h,
 			serv:         sqs.New(conf),
@@ -192,13 +192,8 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	done := make(chan struct{})
 	w := &writer{}
 	go func() {
-		handler := s.Handler
-		if handler == nil {
-			handler = http.DefaultServeMux
-		}
-		handler.ServeHTTP(w, req)
+		s.Handler.ServeHTTP(w, req)
 		done <- struct{}{}
-		p
 	}()
 	hbeat := time.Second * time.Duration(float64(visibilityTimeout)*0.9)
 	for {
