@@ -12,10 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/awslabs/aws-sdk-go/aws"
-	"github.com/awslabs/aws-sdk-go/service/sqs"
-
-	"code.google.com/p/go.net/context"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/sqs"
+	"golang.org/x/net/context"
 )
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
@@ -106,8 +105,12 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 		if err != nil {
 			return fmt.Errorf("Failed to get queue attributes for '%s' - %s", name, err.Error())
 		}
-		to := *(*resp.Attributes)["VisiblityTimeout"]
-		visTimeout, err := strconv.Atoi(to)
+		s.logf("Queue attrs: %+s", resp.Attributes)
+		to := resp.Attributes["VisibilityTimeout"]
+		if to == nil {
+			return fmt.Errorf("No visibility timeout returned by SQS for queue '%s'", name)
+		}
+		visTimeout, err := strconv.Atoi(*to)
 		if err != nil {
 			return fmt.Errorf("Failed to convert visibility timeout from '%s' to int - '%s'", to, err.Error())
 		}
@@ -165,11 +168,11 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	headers := http.Header{}
 
 	// SQS Specific attributes are mapped as X-Amzn-*
-	for k, attr := range *(m.Attributes) {
+	for k, attr := range m.Attributes {
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
 	}
 	path := fmt.Sprintf("/%s", q.name)
-	for k, attr := range *(m.MessageAttributes) {
+	for k, attr := range m.MessageAttributes {
 		if k == "Path" {
 			path = fmt.Sprintf("%s/%s", path, *attr.StringValue)
 			continue
@@ -182,6 +185,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	headers.Set("X-Amzn-MessageID", *m.MessageID)
 
 	url, _ := url.Parse(path)
+	s.logf("Serving for path %s", url)
 	req := &http.Request{
 		URL:    url,
 		Method: "POST",
