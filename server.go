@@ -21,13 +21,15 @@ import (
 type SQSServer struct {
 	// ErrorLog specifies an optional logger for message related
 	// errors. If nil, logging goes to os.Stderr
-	ErrorLog     *log.Logger
-	Handler      http.Handler
-	serv         *sqs.SQS
-	stopPolling  func()
-	stopTasks    func()
-	tasks        sync.WaitGroup
-	queuePollers sync.WaitGroup
+	ErrorLog            *log.Logger
+	Handler             http.Handler
+	serv                *sqs.SQS
+	stopPolling         func()
+	stopTasks           func()
+	tasks               sync.WaitGroup
+	queuePollers        sync.WaitGroup
+	mu                  sync.Mutex
+	currentPollRequests map[string]*aws.Request
 }
 
 type writer struct {
@@ -47,10 +49,14 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	if h == nil {
 		h = http.DefaultServeMux
 	}
+	conf.HTTPClient = &http.Client{
+		Transport: http.DefaultTransport,
+	}
 	return &SQSServer{
-			Handler:      h,
-			serv:         sqs.New(conf),
-			queuePollers: sync.WaitGroup{},
+			Handler:             h,
+			serv:                sqs.New(conf),
+			queuePollers:        sync.WaitGroup{},
+			currentPollRequests: map[string]*aws.Request{},
 		},
 		nil
 }
@@ -71,7 +77,17 @@ func (s *SQSServer) ListenAndServe(queues ...string) error {
 // tasks a change to finish.
 // Shutdown will wait up maxWait duration before returning if any tasks are still running
 func (s *SQSServer) Shutdown(maxWait time.Duration) {
+	// Run the context cancel function
 	s.stopPolling()
+	// The queue pollers will most likely be in the middle of a long poll
+	// Need to cancel their requests
+	s.mu.Lock()
+	for _, req := range s.currentPollRequests {
+		if t, ok := req.Config.HTTPClient.Transport.(*http.Transport); ok {
+			t.CancelRequest(req.HTTPRequest)
+		}
+	}
+	s.mu.Unlock()
 	s.queuePollers.Wait()
 	kill := time.After(maxWait)
 	done := make(chan struct{})
@@ -105,7 +121,6 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 		if err != nil {
 			return fmt.Errorf("Failed to get queue attributes for '%s' - %s", name, err.Error())
 		}
-		s.logf("Queue attrs: %+s", resp.Attributes)
 		to := resp.Attributes["VisibilityTimeout"]
 		if to == nil {
 			return fmt.Errorf("No visibility timeout returned by SQS for queue '%s'", name)
@@ -128,29 +143,37 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 // run will poll a single queue and handle arriving messages
 func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTimeout int64) {
 	failAttempts := 0
+	backoff := time.Duration(0)
 	for {
 		select {
 		case <-pollctx.Done():
 			return
 		default:
+			if backoff.Seconds() > 0 {
+				time.Sleep(backoff)
+			}
 			// Receive only one message at a time to ensure job load is spread over all machines
-			req := &sqs.ReceiveMessageInput{
+			reqInput := &sqs.ReceiveMessageInput{
 				QueueURL:            &q.url,
 				MaxNumberOfMessages: aws.Long(q.batchSize),
 				WaitTimeSeconds:     aws.Long(20),
 				AttributeNames:      q.attributesToReturn,
 			}
-			resp, err := s.serv.ReceiveMessage(req)
-
+			req, resp := s.serv.ReceiveMessageRequest(reqInput)
+			// Mark current polling request
+			s.mu.Lock()
+			s.currentPollRequests[q.name] = req
+			s.mu.Unlock()
+			err := req.Send()
 			if err != nil {
 				failAttempts++
 				if failAttempts > 20 {
 					panic(fmt.Sprintf(" %s - Failed to poll for too long. Panicing (not picnicing).", q.name))
 				}
-				sleep := time.Duration(math.Min(float64(failAttempts*20), 120))
-				time.Sleep(time.Second * sleep)
+				backoff = time.Duration(math.Min(float64(failAttempts*20), 120))
 				continue
 			} else {
+				backoff = time.Duration(0)
 				failAttempts = 0
 			}
 			for i := range resp.Messages {
@@ -172,7 +195,9 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
 	}
 	path := fmt.Sprintf("/%s", q.name)
+	fmt.Printf("ATTRIBUGTES: %+v", m.MessageAttributes)
 	for k, attr := range m.MessageAttributes {
+		fmt.Printf("Handling %s:%+v", k, attr)
 		if k == "Path" {
 			path = fmt.Sprintf("%s/%s", path, *attr.StringValue)
 			continue
