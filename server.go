@@ -199,7 +199,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	path := fmt.Sprintf("/%s", q.name)
 
 	for k, attr := range m.MessageAttributes {
-		fmt.Printf("Handling %s:%+v", k, attr)
+		fmt.Printf("Handling %s:%+v", k, *attr)
 		if k == "Path" {
 			path = fmt.Sprintf("%s/%s", path, *attr.StringValue)
 			continue
@@ -235,13 +235,13 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 		case <-time.After(hbeat):
 			err := s.heartbeat(q, m, visibilityTimeout)
 			if err != nil {
-				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.name, m.MessageID, err.Error())
+				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.name, *m.MessageID, err.Error())
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
 				err := s.ack(q, m)
 				if err != nil {
-					s.logf("ACK Failed %s:%s - Cause '%s'", q.name, m.MessageID, err.Error())
+					s.logf("ACK Failed %s:%s - Cause '%s'", q.name, *m.MessageID, err.Error())
 				}
 			}
 			close(done)
