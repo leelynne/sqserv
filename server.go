@@ -191,8 +191,6 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	defer s.tasks.Done()
 	headers := http.Header{}
 
-	fmt.Printf("ATTRIBUTES: %+v\n", m.MessageAttributes)
-
 	// SQS Specific attributes are mapped as X-Amzn-*
 	for k, attr := range m.Attributes {
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
@@ -200,7 +198,6 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	path := fmt.Sprintf("/%s", q.name)
 
 	for k, attr := range m.MessageAttributes {
-		fmt.Printf("Handling %s:%+v", k, *attr)
 		if k == "Path" {
 			path = fmt.Sprintf("%s/%s", path, *attr.StringValue)
 			continue
