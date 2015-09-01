@@ -154,10 +154,11 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 			}
 			// Receive only one message at a time to ensure job load is spread over all machines
 			reqInput := &sqs.ReceiveMessageInput{
-				QueueURL:            &q.url,
-				MaxNumberOfMessages: aws.Long(q.batchSize),
-				WaitTimeSeconds:     aws.Long(20),
-				AttributeNames:      q.attributesToReturn,
+				QueueURL:              &q.url,
+				MaxNumberOfMessages:   aws.Long(q.batchSize),
+				WaitTimeSeconds:       aws.Long(20),
+				AttributeNames:        q.attributesToReturn,
+				MessageAttributeNames: q.attributesToReturn,
 			}
 			req, resp := s.serv.ReceiveMessageRequest(reqInput)
 			// Mark current polling request
@@ -190,7 +191,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	defer s.tasks.Done()
 	headers := http.Header{}
 
-	fmt.Printf("ATTRIBUTES: %+v", m.MessageAttributes)
+	fmt.Printf("ATTRIBUTES: %+v\n", m.MessageAttributes)
 
 	// SQS Specific attributes are mapped as X-Amzn-*
 	for k, attr := range m.Attributes {
