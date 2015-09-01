@@ -127,7 +127,7 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 		}
 		visTimeout, err := strconv.Atoi(*to)
 		if err != nil {
-			return fmt.Errorf("Failed to convert visibility timeout from '%s' to int - '%s'", to, err.Error())
+			return fmt.Errorf("Failed to convert visibility timeout from '%s' to int - '%s'", *to, err.Error())
 		}
 		// Each queue runs in a dedicated go routine.
 		go func(vt int64) {
@@ -190,12 +190,14 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	defer s.tasks.Done()
 	headers := http.Header{}
 
+	fmt.Printf("ATTRIBUTES: %+v", m.MessageAttributes)
+
 	// SQS Specific attributes are mapped as X-Amzn-*
 	for k, attr := range m.Attributes {
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
 	}
 	path := fmt.Sprintf("/%s", q.name)
-	fmt.Printf("ATTRIBUGTES: %+v", m.MessageAttributes)
+
 	for k, attr := range m.MessageAttributes {
 		fmt.Printf("Handling %s:%+v", k, attr)
 		if k == "Path" {
