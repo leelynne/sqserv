@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/request"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"golang.org/x/net/context"
 )
@@ -29,7 +31,7 @@ type SQSServer struct {
 	tasks               sync.WaitGroup
 	queuePollers        sync.WaitGroup
 	mu                  sync.Mutex
-	currentPollRequests map[string]*aws.Request
+	currentPollRequests map[string]*request.Request
 }
 
 type writer struct {
@@ -54,9 +56,9 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	}
 	return &SQSServer{
 			Handler:             h,
-			serv:                sqs.New(conf),
+			serv:                sqs.New(session.New(), conf),
 			queuePollers:        sync.WaitGroup{},
-			currentPollRequests: map[string]*aws.Request{},
+			currentPollRequests: map[string]*request.Request{},
 		},
 		nil
 }
@@ -115,7 +117,7 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 		}
 		req := &sqs.GetQueueAttributesInput{
 			AttributeNames: []*string{aws.String("VisibilityTimeout")},
-			QueueURL:       &q.url,
+			QueueUrl:       &q.url,
 		}
 		resp, err := s.serv.GetQueueAttributes(req)
 		if err != nil {
@@ -154,9 +156,9 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 			}
 			// Receive only one message at a time to ensure job load is spread over all machines
 			reqInput := &sqs.ReceiveMessageInput{
-				QueueURL:              &q.url,
-				MaxNumberOfMessages:   aws.Long(q.batchSize),
-				WaitTimeSeconds:       aws.Long(20),
+				QueueUrl:              &q.url,
+				MaxNumberOfMessages:   aws.Int64(q.batchSize),
+				WaitTimeSeconds:       aws.Int64(20),
 				AttributeNames:        q.attributesToReturn,
 				MessageAttributeNames: q.attributesToReturn,
 			}
@@ -207,7 +209,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 		}
 	}
 	headers.Set("Content-MD5", *m.MD5OfBody)
-	headers.Set("X-Amzn-MessageID", *m.MessageID)
+	headers.Set("X-Amzn-MessageID", *m.MessageId)
 
 	url, _ := url.Parse(path)
 	s.logf("Serving for path %s", url)
@@ -233,13 +235,13 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 		case <-time.After(hbeat):
 			err := s.heartbeat(q, m, visibilityTimeout)
 			if err != nil {
-				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.name, *m.MessageID, err.Error())
+				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.name, *m.MessageId, err.Error())
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
 				err := s.ack(q, m)
 				if err != nil {
-					s.logf("ACK Failed %s:%s - Cause '%s'", q.name, *m.MessageID, err.Error())
+					s.logf("ACK Failed %s:%s - Cause '%s'", q.name, *m.MessageId, err.Error())
 				}
 			}
 			close(done)
@@ -249,16 +251,16 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 }
 
 func (s *SQSServer) getQueue(queueName string) (queue, error) {
-	req := &sqs.GetQueueURLInput{
+	req := &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
 	}
-	url, err := s.serv.GetQueueURL(req)
+	url, err := s.serv.GetQueueUrl(req)
 	if err != nil {
 		return queue{}, fmt.Errorf("Failed to get queue %s - '%s'", queueName, err.Error())
 	}
 	return queue{
 		name:               queueName,
-		url:                *url.QueueURL,
+		url:                *url.QueueUrl,
 		attributesToReturn: []*string{aws.String("All")},
 		batchSize:          1,
 	}, nil
@@ -266,7 +268,7 @@ func (s *SQSServer) getQueue(queueName string) (queue, error) {
 
 func (s *SQSServer) ack(q queue, m *sqs.Message) error {
 	req := &sqs.DeleteMessageInput{
-		QueueURL:      &q.url,
+		QueueUrl:      &q.url,
 		ReceiptHandle: m.ReceiptHandle,
 	}
 	_, err := s.serv.DeleteMessage(req)
@@ -275,9 +277,9 @@ func (s *SQSServer) ack(q queue, m *sqs.Message) error {
 
 func (s *SQSServer) heartbeat(q queue, m *sqs.Message, visibilityTimeout int64) error {
 	req := &sqs.ChangeMessageVisibilityInput{
-		QueueURL:          &q.url,
+		QueueUrl:          &q.url,
 		ReceiptHandle:     m.ReceiptHandle,
-		VisibilityTimeout: aws.Long(visibilityTimeout),
+		VisibilityTimeout: aws.Int64(visibilityTimeout),
 	}
 	_, err := s.serv.ChangeMessageVisibility(req)
 	return err
