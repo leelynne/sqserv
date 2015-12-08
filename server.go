@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"golang.org/x/net/context"
@@ -23,15 +22,13 @@ import (
 type SQSServer struct {
 	// ErrorLog specifies an optional logger for message related
 	// errors. If nil, logging goes to os.Stderr
-	ErrorLog            *log.Logger
-	Handler             http.Handler
-	serv                *sqs.SQS
-	stopPolling         func()
-	stopTasks           func()
-	tasks               sync.WaitGroup
-	queuePollers        sync.WaitGroup
-	mu                  sync.Mutex
-	currentPollRequests map[string]*request.Request
+	ErrorLog     *log.Logger
+	Handler      http.Handler
+	serv         *sqs.SQS
+	stopPolling  func()
+	stopTasks    func()
+	tasks        sync.WaitGroup
+	queuePollers sync.WaitGroup
 }
 
 type writer struct {
@@ -55,10 +52,9 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 		Transport: http.DefaultTransport,
 	}
 	return &SQSServer{
-			Handler:             h,
-			serv:                sqs.New(session.New(), conf),
-			queuePollers:        sync.WaitGroup{},
-			currentPollRequests: map[string]*request.Request{},
+			Handler:      h,
+			serv:         sqs.New(session.New(), conf),
+			queuePollers: sync.WaitGroup{},
 		},
 		nil
 }
@@ -83,13 +79,6 @@ func (s *SQSServer) Shutdown(maxWait time.Duration) {
 	s.stopPolling()
 	// The queue pollers will most likely be in the middle of a long poll
 	// Need to cancel their requests
-	s.mu.Lock()
-	for _, req := range s.currentPollRequests {
-		if t, ok := req.Config.HTTPClient.Transport.(*http.Transport); ok {
-			t.CancelRequest(req.HTTPRequest)
-		}
-	}
-	s.mu.Unlock()
 	s.queuePollers.Wait()
 	kill := time.After(maxWait)
 	done := make(chan struct{})
@@ -163,10 +152,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 				MessageAttributeNames: q.attributesToReturn,
 			}
 			req, resp := s.serv.ReceiveMessageRequest(reqInput)
-			// Mark current polling request
-			s.mu.Lock()
-			s.currentPollRequests[q.name] = req
-			s.mu.Unlock()
+			req.HTTPRequest.Cancel = pollctx.Done()
 			err := req.Send()
 			if err != nil {
 				failAttempts++
