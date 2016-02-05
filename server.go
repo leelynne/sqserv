@@ -18,17 +18,33 @@ import (
 	"golang.org/x/net/context"
 )
 
+const (
+	defaultReadBatchSize = 1 // Size one ensures best load balancing between multiple SQS listeners
+)
+
 // SQSServer handles SQS messages in a similar fashion to http.Server
 type SQSServer struct {
 	// ErrorLog specifies an optional logger for message related
 	// errors. If nil, logging goes to os.Stderr
-	ErrorLog     *log.Logger
-	Handler      http.Handler
-	serv         *sqs.SQS
+	ErrorLog       *log.Logger
+	Handler        http.Handler
+	defaultAWSConf *aws.Config
+	defaultRegion  string
+
 	stopPolling  func()
 	stopTasks    func()
 	tasks        sync.WaitGroup
 	queuePollers sync.WaitGroup
+
+	mu          sync.Mutex
+	srvByRegion map[string]*sqs.SQS
+}
+
+type QueueConf struct {
+	Name string
+	// Region will override the region in the aws.Config passed to New()
+	Region    string
+	ReadBatch uint
 }
 
 type writer struct {
@@ -36,25 +52,30 @@ type writer struct {
 }
 
 type queue struct {
-	name               string
+	QueueConf
 	url                string
-	batchSize          int64
 	attributesToReturn []*string
 }
 
-// New creates a new SQSServer.
-// If Handler is nil http.DefaultServeMux is used
+// New creates a new SQSServer. If Handler is nil http.DefaultServeMux is used
+// Must specify a region in conf that will be the default queue region
 func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
+	if conf.Region == nil || *conf.Region == "" {
+		return nil, fmt.Errorf("Must specify default region in aws.Config")
+	}
 	if h == nil {
 		h = http.DefaultServeMux
 	}
 	conf.HTTPClient = &http.Client{
 		Transport: http.DefaultTransport,
 	}
+
 	return &SQSServer{
-			Handler:      h,
-			serv:         sqs.New(session.New(), conf),
-			queuePollers: sync.WaitGroup{},
+			Handler:        h,
+			defaultAWSConf: conf,
+			defaultRegion:  *conf.Region,
+			srvByRegion:    map[string]*sqs.SQS{},
+			queuePollers:   sync.WaitGroup{},
 		},
 		nil
 }
@@ -68,6 +89,34 @@ func (s *SQSServer) ListenAndServe(queues ...string) error {
 	taskctx, taskcancel := context.WithCancel(context.Background())
 	s.stopPolling = pollcancel
 	s.stopTasks = taskcancel
+	qconfs := make([]QueueConf, len(queues))
+	for i := range queues {
+		qconfs[i].Name = queues[i]
+		qconfs[i].Region = s.defaultRegion
+		qconfs[i].ReadBatch = defaultReadBatchSize
+	}
+	return s.pollQueues(pollctx, taskctx, qconfs)
+}
+
+func (s *SQSServer) ListenAndServeQueus(queues ...QueueConf) error {
+	if len(queues) == 0 {
+		return fmt.Errorf("Must specify at least one SQS queue to poll")
+	}
+	pollctx, pollcancel := context.WithCancel(context.Background())
+	taskctx, taskcancel := context.WithCancel(context.Background())
+	s.stopPolling = pollcancel
+	s.stopTasks = taskcancel
+	for i := range queues {
+		if queues[i].Name == "" {
+			return fmt.Errorf("Queue configuration must have a Name")
+		}
+		if queues[i].Region == "" {
+			queues[i].Region = s.defaultRegion
+		}
+		if queues[i].ReadBatch == 0 {
+			queues[i].ReadBatch = defaultReadBatchSize
+		}
+	}
 	return s.pollQueues(pollctx, taskctx, queues)
 }
 
@@ -98,9 +147,9 @@ func (s *SQSServer) Shutdown(maxWait time.Duration) {
 }
 
 // pollQueues kicks off a goroutines for polling the specified queues
-func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []string) error {
-	for _, name := range queueNames {
-		q, err := s.getQueue(name)
+func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queues []QueueConf) error {
+	for _, qconf := range queues {
+		q, err := s.getQueue(qconf)
 		if err != nil {
 			return err
 		}
@@ -108,13 +157,13 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queueNames []st
 			AttributeNames: []*string{aws.String("VisibilityTimeout")},
 			QueueUrl:       &q.url,
 		}
-		resp, err := s.serv.GetQueueAttributes(req)
+		resp, err := s.sqsSrv(q.QueueConf).GetQueueAttributes(req)
 		if err != nil {
-			return fmt.Errorf("Failed to get queue attributes for '%s' - %s", name, err.Error())
+			return fmt.Errorf("Failed to get queue attributes for '%s' - %s", q.Name, err.Error())
 		}
 		to := resp.Attributes["VisibilityTimeout"]
 		if to == nil {
-			return fmt.Errorf("No visibility timeout returned by SQS for queue '%s'", name)
+			return fmt.Errorf("No visibility timeout returned by SQS for queue '%s'", q.Name)
 		}
 		visTimeout, err := strconv.Atoi(*to)
 		if err != nil {
@@ -146,18 +195,18 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 			// Receive only one message at a time to ensure job load is spread over all machines
 			reqInput := &sqs.ReceiveMessageInput{
 				QueueUrl:              &q.url,
-				MaxNumberOfMessages:   aws.Int64(q.batchSize),
+				MaxNumberOfMessages:   aws.Int64(int64(q.ReadBatch)),
 				WaitTimeSeconds:       aws.Int64(20),
 				AttributeNames:        q.attributesToReturn,
 				MessageAttributeNames: q.attributesToReturn,
 			}
-			req, resp := s.serv.ReceiveMessageRequest(reqInput)
+			req, resp := s.sqsSrv(q.QueueConf).ReceiveMessageRequest(reqInput)
 			req.HTTPRequest.Cancel = pollctx.Done()
 			err := req.Send()
 			if err != nil {
 				failAttempts++
 				if failAttempts > 20 {
-					panic(fmt.Sprintf(" %s - Failed to poll for too long. Panicing (not picnicing).", q.name))
+					panic(fmt.Sprintf(" %s - Failed to poll for too long. Panicing (not picnicing).", q.Name))
 				}
 				backoff = time.Duration(math.Min(float64(failAttempts*20), 120))
 				continue
@@ -183,7 +232,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	for k, attr := range m.Attributes {
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
 	}
-	path := fmt.Sprintf("/%s", q.name)
+	path := fmt.Sprintf("/%s", q.Name)
 
 	for k, attr := range m.MessageAttributes {
 		if k == "Path" {
@@ -221,13 +270,13 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 		case <-time.After(hbeat):
 			err := s.heartbeat(q, m, visibilityTimeout)
 			if err != nil {
-				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.name, *m.MessageId, err.Error())
+				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
 				err := s.ack(q, m)
 				if err != nil {
-					s.logf("ACK Failed %s:%s - Cause '%s'", q.name, *m.MessageId, err.Error())
+					s.logf("ACK Failed %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 				}
 			}
 			close(done)
@@ -236,19 +285,18 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	}
 }
 
-func (s *SQSServer) getQueue(queueName string) (queue, error) {
+func (s *SQSServer) getQueue(q QueueConf) (queue, error) {
 	req := &sqs.GetQueueUrlInput{
-		QueueName: &queueName,
+		QueueName: &q.Name,
 	}
-	url, err := s.serv.GetQueueUrl(req)
+	url, err := s.sqsSrv(q).GetQueueUrl(req)
 	if err != nil {
-		return queue{}, fmt.Errorf("Failed to get queue %s - '%s'", queueName, err.Error())
+		return queue{}, fmt.Errorf("Failed to get queue %s - '%s'", q.Name, err.Error())
 	}
 	return queue{
-		name:               queueName,
+		QueueConf:          q,
 		url:                *url.QueueUrl,
 		attributesToReturn: []*string{aws.String("All")},
-		batchSize:          1,
 	}, nil
 }
 
@@ -257,7 +305,7 @@ func (s *SQSServer) ack(q queue, m *sqs.Message) error {
 		QueueUrl:      &q.url,
 		ReceiptHandle: m.ReceiptHandle,
 	}
-	_, err := s.serv.DeleteMessage(req)
+	_, err := s.sqsSrv(q.QueueConf).DeleteMessage(req)
 	return err
 }
 
@@ -267,8 +315,17 @@ func (s *SQSServer) heartbeat(q queue, m *sqs.Message, visibilityTimeout int64) 
 		ReceiptHandle:     m.ReceiptHandle,
 		VisibilityTimeout: aws.Int64(visibilityTimeout),
 	}
-	_, err := s.serv.ChangeMessageVisibility(req)
+	_, err := s.sqsSrv(q.QueueConf).ChangeMessageVisibility(req)
 	return err
+}
+
+func (s *SQSServer) sqsSrv(q QueueConf) *sqs.SQS {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srvByRegion[q.Region] == nil {
+		s.srvByRegion[q.Region] = sqs.New(session.New(s.defaultAWSConf), &aws.Config{Region: aws.String(q.Region)})
+	}
+	return s.srvByRegion[q.Region]
 }
 
 func (s *SQSServer) logf(msg string, args ...interface{}) {
