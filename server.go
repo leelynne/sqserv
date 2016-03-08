@@ -247,7 +247,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	headers.Set("X-Amzn-MessageID", *m.MessageId)
 
 	url, _ := url.Parse(path)
-	s.logf("Serving for path %s", url)
+
 	req := &http.Request{
 		URL:    url,
 		Method: "POST",
