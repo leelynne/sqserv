@@ -1,10 +1,7 @@
 package sqserv
 
-import (
-	"testing"
-
-	"github.com/awslabs/aws-sdk-go/aws"
-)
+import "testing"
+import "github.com/aws/aws-sdk-go/aws"
 
 func TestZeroQueues(t *testing.T) {
 	conf := &aws.Config{}
