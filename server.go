@@ -243,6 +243,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	s.tasks.Add(1)
 	defer s.tasks.Done()
 	atomic.AddInt32(&q.inprocess, 1)
+	defer atomic.AddInt32(&q.inprocess, -1)
 	headers := http.Header{}
 
 	// SQS Specific attributes are mapped as X-Amzn-*
