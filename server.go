@@ -230,6 +230,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 				backoff = time.Duration(0)
 				failAttempts = 0
 			}
+			atomic.AddInt32(&q.inprocess, int32(len(resp.Messages)))
 			for i := range resp.Messages {
 				msg := resp.Messages[i]
 				// Run each request/message in its own goroutine
@@ -242,7 +243,6 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, visibilityTimeout int64) {
 	s.tasks.Add(1)
 	defer s.tasks.Done()
-	atomic.AddInt32(&q.inprocess, 1)
 	defer atomic.AddInt32(&q.inprocess, -1)
 	headers := http.Header{}
 
