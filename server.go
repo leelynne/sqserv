@@ -196,7 +196,7 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queues []QueueC
 }
 
 // run will poll a single queue and handle arriving messages
-func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTimeout int64) {
+func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTimeout int64) {
 	failAttempts := 0
 	backoff := time.Duration(0)
 	for {
@@ -240,7 +240,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 	}
 }
 
-func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, visibilityTimeout int64) {
+func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, visibilityTimeout int64) {
 	s.tasks.Add(1)
 	defer s.tasks.Done()
 	defer atomic.AddInt32(&q.inprocess, -1)
@@ -308,22 +308,22 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 	}
 }
 
-func (s *SQSServer) getQueue(q QueueConf) (queue, error) {
+func (s *SQSServer) getQueue(q QueueConf) (*queue, error) {
 	req := &sqs.GetQueueUrlInput{
 		QueueName: &q.Name,
 	}
 	url, err := s.sqsSrv(q).GetQueueUrl(req)
 	if err != nil {
-		return queue{}, fmt.Errorf("Failed to get queue %s - '%s'", q.Name, err.Error())
+		return nil, fmt.Errorf("Failed to get queue %s - '%s'", q.Name, err.Error())
 	}
-	return queue{
+	return &queue{
 		QueueConf:          q,
 		url:                *url.QueueUrl,
 		attributesToReturn: []*string{aws.String("All")},
 	}, nil
 }
 
-func (s *SQSServer) ack(q queue, m *sqs.Message) error {
+func (s *SQSServer) ack(q *queue, m *sqs.Message) error {
 	req := &sqs.DeleteMessageInput{
 		QueueUrl:      &q.url,
 		ReceiptHandle: m.ReceiptHandle,
@@ -332,7 +332,7 @@ func (s *SQSServer) ack(q queue, m *sqs.Message) error {
 	return err
 }
 
-func (s *SQSServer) heartbeat(q queue, m *sqs.Message, visibilityTimeout int64) error {
+func (s *SQSServer) heartbeat(q *queue, m *sqs.Message, visibilityTimeout int64) error {
 	req := &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          &q.url,
 		ReceiptHandle:     m.ReceiptHandle,
