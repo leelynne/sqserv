@@ -19,8 +19,13 @@ import (
 	"golang.org/x/net/context"
 )
 
+type MetricType int
+
 const (
-	defaultReadBatchSize = 1 // Size one ensures best load balancing between multiple SQS listeners
+	defaultReadBatchSize            = 1 // Size one ensures best load balancing between multiple SQS listeners
+	MetricAck            MetricType = iota
+	MetricNack
+	MetricHeartBeat
 )
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
@@ -41,15 +46,14 @@ type SQSServer struct {
 	srvByRegion map[string]*sqs.SQS
 }
 
-type MetricCallback func(int)
+type MetricCallback func(m MetricType, inflight int)
 
 type QueueConf struct {
 	Name string
 	// Region will override the region in the aws.Config passed to New()
-	Region            string
-	ReadBatch         uint
-	AckCallback       MetricCallback
-	HeartbeatCallback MetricCallback
+	Region    string
+	ReadBatch uint
+	Metrics   MetricCallback
 }
 
 type writer struct {
@@ -100,8 +104,7 @@ func (s *SQSServer) ListenAndServe(queues ...string) error {
 		qconfs[i].Name = queues[i]
 		qconfs[i].Region = s.defaultRegion
 		qconfs[i].ReadBatch = defaultReadBatchSize
-		qconfs[i].AckCallback = func(int) {}
-		qconfs[i].HeartbeatCallback = func(int) {}
+		qconfs[i].Metrics = func(MetricType, int) {}
 	}
 
 	return s.pollQueues(pollctx, taskctx, qconfs)
@@ -125,11 +128,8 @@ func (s *SQSServer) ListenAndServeQueus(queues ...QueueConf) error {
 		if queues[i].ReadBatch == 0 {
 			queues[i].ReadBatch = defaultReadBatchSize
 		}
-		if queues[i].AckCallback == nil {
-			queues[i].AckCallback = func(int) {}
-		}
-		if queues[i].HeartbeatCallback == nil {
-			queues[i].HeartbeatCallback = func(int) {}
+		if queues[i].Metrics == nil {
+			queues[i].Metrics = func(MetricType, int) {}
 		}
 	}
 	return s.pollQueues(pollctx, taskctx, queues)
@@ -232,7 +232,6 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q queue, visibilityTim
 			}
 			for i := range resp.Messages {
 				msg := resp.Messages[i]
-				fmt.Printf("Start %s\n", *msg.MessageId)
 				// Run each request/message in its own goroutine
 				go s.serveMessage(taskctx, q, msg, visibilityTimeout)
 			}
@@ -290,19 +289,17 @@ func (s *SQSServer) serveMessage(ctx context.Context, q queue, m *sqs.Message, v
 			if err != nil {
 				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 			} else {
-				q.HeartbeatCallback(int(atomic.LoadInt32(&q.inprocess)))
+				q.Metrics(MetricHeartBeat, int(atomic.LoadInt32(&q.inprocess)))
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
-				fmt.Printf("Done %s\n", *m.MessageId)
 				err := s.ack(q, m)
 				if err != nil {
 					s.logf("ACK Failed %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
+					q.Metrics(MetricNack, int(atomic.LoadInt32(&q.inprocess)))
 				} else {
-					q.AckCallback(int(atomic.LoadInt32(&q.inprocess)))
+					q.Metrics(MetricAck, int(atomic.LoadInt32(&q.inprocess)))
 				}
-			} else {
-				fmt.Printf("Done no ACK %s\n", *m.MessageId)
 			}
 			close(done)
 			return
