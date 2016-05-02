@@ -46,7 +46,7 @@ type SQSServer struct {
 	srvByRegion map[string]*sqs.SQS
 }
 
-type MetricCallback func(m MetricType, inflight int)
+type MetricCallback func(m MetricType, val float64, inflight int)
 
 type QueueConf struct {
 	Name string
@@ -104,7 +104,7 @@ func (s *SQSServer) ListenAndServe(queues ...string) error {
 		qconfs[i].Name = queues[i]
 		qconfs[i].Region = s.defaultRegion
 		qconfs[i].ReadBatch = defaultReadBatchSize
-		qconfs[i].Metrics = func(MetricType, int) {}
+		qconfs[i].Metrics = func(MetricType, float64, int) {}
 	}
 
 	return s.pollQueues(pollctx, taskctx, qconfs)
@@ -129,7 +129,7 @@ func (s *SQSServer) ListenAndServeQueus(queues ...QueueConf) error {
 			queues[i].ReadBatch = defaultReadBatchSize
 		}
 		if queues[i].Metrics == nil {
-			queues[i].Metrics = func(MetricType, int) {}
+			queues[i].Metrics = func(MetricType, float64, int) {}
 		}
 	}
 	return s.pollQueues(pollctx, taskctx, queues)
@@ -230,11 +230,13 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 				backoff = time.Duration(0)
 				failAttempts = 0
 			}
+			start := time.Now()
 			atomic.AddInt32(&q.inprocess, int32(len(resp.Messages)))
+			ctxWithTime := context.WithValue(taskctx, "start", start)
 			for i := range resp.Messages {
 				msg := resp.Messages[i]
 				// Run each request/message in its own goroutine
-				go s.serveMessage(taskctx, q, msg, visibilityTimeout)
+				go s.serveMessage(ctxWithTime, q, msg, visibilityTimeout)
 			}
 		}
 	}
@@ -244,6 +246,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 	s.tasks.Add(1)
 	defer s.tasks.Done()
 	defer atomic.AddInt32(&q.inprocess, -1)
+	start := ctx.Value("start").(time.Time)
 	headers := http.Header{}
 
 	// SQS Specific attributes are mapped as X-Amzn-*
@@ -290,16 +293,16 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 			if err != nil {
 				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 			} else {
-				q.Metrics(MetricHeartBeat, int(atomic.LoadInt32(&q.inprocess)))
+				q.Metrics(MetricHeartBeat, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
 				err := s.ack(q, m)
 				if err != nil {
 					s.logf("ACK Failed %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
-					q.Metrics(MetricNack, int(atomic.LoadInt32(&q.inprocess)))
+					q.Metrics(MetricNack, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 				} else {
-					q.Metrics(MetricAck, int(atomic.LoadInt32(&q.inprocess)))
+					q.Metrics(MetricAck, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 				}
 			}
 			close(done)
@@ -346,7 +349,10 @@ func (s *SQSServer) sqsSrv(q QueueConf) *sqs.SQS {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.srvByRegion[q.Region] == nil {
-		s.srvByRegion[q.Region] = sqs.New(session.New(s.defaultAWSConf), &aws.Config{Region: aws.String(q.Region)})
+		aconf := &aws.Config{
+			Region: aws.String(q.Region),
+		}
+		s.srvByRegion[q.Region] = sqs.New(session.New(s.defaultAWSConf, aconf), aconf)
 	}
 	return s.srvByRegion[q.Region]
 }
@@ -358,6 +364,11 @@ func (s *SQSServer) logf(msg string, args ...interface{}) {
 		log.Printf(msg, args)
 	}
 }
+
+func durationMillis(t time.Time) float64 {
+	return float64((time.Since(t) / time.Millisecond))
+}
+
 func (w *writer) Header() http.Header {
 	return http.Header{}
 }
