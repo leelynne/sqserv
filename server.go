@@ -305,6 +305,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 					q.Metrics(MetricAck, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 				}
 			}
+			q.Metrics(MetricNack, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 			close(done)
 			return
 		}
