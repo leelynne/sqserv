@@ -27,6 +27,8 @@ const (
 	MetricNack
 	MetricHeartBeat
 	MetricPollFailure
+	MetricReceive
+	MetricShutdown
 )
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
@@ -233,7 +235,8 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 				failAttempts = 0
 			}
 			start := time.Now()
-			atomic.AddInt32(&q.inprocess, int32(len(resp.Messages)))
+			inflight := atomic.AddInt32(&q.inprocess, int32(len(resp.Messages)))
+			q.Metrics(MetricReceive, float64(len(resp.Messages)), int(inflight))
 			ctxWithTime := context.WithValue(taskctx, "start", start)
 			for i := range resp.Messages {
 				msg := resp.Messages[i]
@@ -288,6 +291,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 	for {
 		select {
 		case <-ctx.Done():
+			q.Metrics(MetricAck, 1, int(atomic.LoadInt32(&q.inprocess)))
 			close(done)
 			return
 		case <-time.After(hbeat):
