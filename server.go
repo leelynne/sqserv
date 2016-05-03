@@ -26,6 +26,7 @@ const (
 	MetricAck            MetricType = iota
 	MetricNack
 	MetricHeartBeat
+	MetricPollFailure
 )
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
@@ -220,6 +221,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 			req.HTTPRequest.Cancel = pollctx.Done()
 			err := req.Send()
 			if err != nil {
+				q.Metrics(MetricPollFailure, 1, int(atomic.LoadInt32(&q.inprocess)))
 				failAttempts++
 				if failAttempts > 20 {
 					panic(fmt.Sprintf(" %s - Failed to poll for too long. Panicing (not picnicing).", q.Name))
