@@ -19,16 +19,17 @@ import (
 	"golang.org/x/net/context"
 )
 
+// MetricType lists each action that generates a MetricCallback
 type MetricType int
 
 const (
-	defaultReadBatchSize            = 1 // Size one ensures best load balancing between multiple SQS listeners
-	MetricAck            MetricType = iota
-	MetricNack
-	MetricHeartBeat
-	MetricPollFailure
-	MetricReceive
-	MetricShutdown
+	defaultReadBatchSize            = 1    // Size one ensures best load balancing between multiple SQS listeners.
+	MetricAck            MetricType = iota // Called after message processing success response. val is always 1.
+	MetricNack                             // Called after message processing failure response. val is always 1. Note that SQS does not have nacks.
+	MetricHeartBeat                        // Called when a heartbeat/extend vibisility timeout was triggered. val is always 1.
+	MetricPollFailure                      // Called after failure of an SQS long poll request. val is always 1.
+	MetricReceive                          // Called after a successful batch message receive. val is the number of messages received in the batch.
+	MetricShutdown                         // Called when the the Shutdown method is invoked. val is always 1.
 )
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
@@ -49,13 +50,14 @@ type SQSServer struct {
 	srvByRegion map[string]*sqs.SQS
 }
 
+// MetricCallback provides telemetry for library users. 'val' is specific to the MetricType. 'inflight' is the current count of all messages received but not yet processed.
 type MetricCallback func(m MetricType, val float64, inflight int)
 
+// QueueConf allows for details queue configuration
 type QueueConf struct {
-	Name string
-	// Region will override the region in the aws.Config passed to New()
-	Region    string
-	ReadBatch uint
+	Name      string
+	Region    string // Region will override the region in the aws.Config passed to New()
+	ReadBatch uint   // Size of read batch. Defaults to maximum allows by SQS.
 	Metrics   MetricCallback
 }
 
@@ -70,8 +72,8 @@ type queue struct {
 	inprocess          int32
 }
 
-// New creates a new SQSServer. If Handler is nil http.DefaultServeMux is used
-// Must specify a region in conf that will be the default queue region
+// New creates a new SQSServer. If Handler is nil http.DefaultServeMux is used.
+// Must specify a region in conf that will be the default queue region.
 func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	if conf.Region == nil || *conf.Region == "" {
 		return nil, fmt.Errorf("Must specify default region in aws.Config")
@@ -113,7 +115,8 @@ func (s *SQSServer) ListenAndServe(queues ...string) error {
 	return s.pollQueues(pollctx, taskctx, qconfs)
 }
 
-func (s *SQSServer) ListenAndServeQueus(queues ...QueueConf) error {
+// ListenAndServeQueues begins polling SQS without blocking.
+func (s *SQSServer) ListenAndServeQueues(queues ...QueueConf) error {
 	if len(queues) == 0 {
 		return fmt.Errorf("Must specify at least one SQS queue to poll")
 	}
