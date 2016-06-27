@@ -1,8 +1,12 @@
 # sqserv
+
+[![GoDoc](https://godoc.org/github.com/leelynne/sqserv?status.svg)](https://godoc.org/github.com/leelynne/sqserv)
+
+
 Package sqserv provides a net/http style interface for handling AWS SQS messages.  http.Request objects are generated from SQS messages then handled with standard http.Handler methods.
 
 ### Why?
-Using the net/http interface allows for reuse of http middleware and other related utilities.
+Using the net/http interface allows for handy reuse of http middleware and other related utilities.
 
 ###Basic Example
 
@@ -32,6 +36,7 @@ Using the net/http interface allows for reuse of http middleware and other relat
 ```
 
 [The package doc](https://godoc.org/github.com/leelynne/sqserv) contains more examples and implementation details.
+
 
 ## Documentation
 [godoc](https://godoc.org/github.com/leelynne/sqserv) contains more examples and implementation details.
