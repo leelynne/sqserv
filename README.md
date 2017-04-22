@@ -8,7 +8,7 @@ Package sqserv provides a net/http style interface for handling AWS SQS messages
 ### Why?
 Using the net/http interface allows for handy reuse of http middleware and other related utilities.
 
-###Basic Example
+### Basic Example
 
 ``` go
     queueHandler := func(w http.ResponseWriter, req *http.Request) {
@@ -17,7 +17,7 @@ Using the net/http interface allows for handy reuse of http middleware and other
 		// Ack the message by returning a success code
 		w.WriteHeader(http.StatusNoContent)
 	}
-    // For SQS queue name 'message-queue'
+        // For SQS queue name 'message-queue'
 	// Use any http.Handler compatible router/middleware
 	mux := http.NewServeMux()
 	mux.Handle("/message-queue", http.HandlerFunc(queueHandler))
