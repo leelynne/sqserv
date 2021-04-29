@@ -283,6 +283,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 		Header: headers,
 		Body:   ioutil.NopCloser(strings.NewReader(*m.Body)),
 	}
+	req = req.WithContext(ctx)
 
 	done := make(chan struct{})
 	w := &writer{}
@@ -372,7 +373,7 @@ func (s *SQSServer) logf(msg string, args ...interface{}) {
 	if s.ErrorLog != nil {
 		s.ErrorLog.Printf(msg, args...)
 	} else {
-		log.Printf(msg, args)
+		log.Printf(msg, args...)
 	}
 }
 
