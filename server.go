@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -82,7 +83,11 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 		h = http.DefaultServeMux
 	}
 	conf.HTTPClient = &http.Client{
-		Transport: http.DefaultTransport,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: 3 * time.Second,
+			}).DialContext,
+		},
 	}
 
 	return &SQSServer{
@@ -170,7 +175,7 @@ func (s *SQSServer) Shutdown(maxWait time.Duration) {
 // pollQueues kicks off a goroutines for polling the specified queues
 func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queues []QueueConf) error {
 	for _, qconf := range queues {
-		q, err := s.getQueue(qconf)
+		q, err := s.getQueue(pollctx, qconf)
 		if err != nil {
 			return err
 		}
@@ -323,11 +328,11 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 	}
 }
 
-func (s *SQSServer) getQueue(q QueueConf) (*queue, error) {
+func (s *SQSServer) getQueue(ctx context.Context, q QueueConf) (*queue, error) {
 	req := &sqs.GetQueueUrlInput{
 		QueueName: &q.Name,
 	}
-	url, err := s.sqsSrv(q).GetQueueUrl(req)
+	url, err := s.sqsSrv(q).GetQueueUrlWithContext(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get queue %s - '%s'", q.Name, err.Error())
 	}
