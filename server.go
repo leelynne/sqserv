@@ -369,7 +369,11 @@ func (s *SQSServer) sqsSrv(q QueueConf) *sqs.SQS {
 		aconf := &aws.Config{
 			Region: aws.String(q.Region),
 		}
-		s.srvByRegion[q.Region] = sqs.New(session.New(s.defaultAWSConf, aconf), aconf)
+		sess, err := session.NewSession(s.defaultAWSConf, aconf)
+		if err != nil {
+			panic(err)
+		}
+		s.srvByRegion[q.Region] = sqs.New(sess, aconf)
 	}
 	return s.srvByRegion[q.Region]
 }
