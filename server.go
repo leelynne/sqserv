@@ -33,6 +33,23 @@ const (
 	MetricShutdown                         // Called when the the Shutdown method is invoked. val is always 1.
 )
 
+var defaultHttpClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   3  * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       1000,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
+
 // SQSServer handles SQS messages in a similar fashion to http.Server
 type SQSServer struct {
 	// ErrorLog specifies an optional logger for message related
@@ -82,13 +99,7 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	if h == nil {
 		h = http.DefaultServeMux
 	}
-	conf.HTTPClient = &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout: 3 * time.Second,
-			}).DialContext,
-		},
-	}
+	conf.HTTPClient = defaultHttpClient
 
 	return &SQSServer{
 			Handler:        h,
