@@ -82,12 +82,15 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	if h == nil {
 		h = http.DefaultServeMux
 	}
-	conf.HTTPClient = &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout: 3 * time.Second,
-			}).DialContext,
-		},
+	if conf.HTTPClient == nil {
+		// For backwards compatibility, set this http client if one is not already set.
+		conf.HTTPClient = &http.Client{
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout: 3 * time.Second,
+				}).DialContext,
+			},
+		}
 	}
 
 	return &SQSServer{
