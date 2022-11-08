@@ -14,9 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+
 	"golang.org/x/net/context"
 )
 
@@ -39,7 +40,7 @@ type SQSServer struct {
 	// errors. If nil, logging goes to os.Stderr
 	ErrorLog       *log.Logger
 	Handler        http.Handler
-	defaultAWSConf *aws.Config
+	defaultAWSConf aws.Config
 	defaultRegion  string
 
 	stopPolling  func()
@@ -48,7 +49,7 @@ type SQSServer struct {
 	queuePollers sync.WaitGroup
 
 	mu          sync.Mutex
-	srvByRegion map[string]*sqs.SQS
+	srvByRegion map[string]*sqs.Client
 }
 
 // MetricCallback provides telemetry for library users. 'val' is specific to the MetricType. 'inflight' is the current count of all messages received but not yet processed.
@@ -69,14 +70,14 @@ type writer struct {
 type queue struct {
 	QueueConf
 	url                string
-	attributesToReturn []*string
+	attributesToReturn []string
 	inprocess          int32
 }
 
 // New creates a new SQSServer. If Handler is nil http.DefaultServeMux is used.
 // Must specify a region in conf that will be the default queue region.
-func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
-	if conf.Region == nil || *conf.Region == "" {
+func New(conf aws.Config, h http.Handler) (*SQSServer, error) {
+	if conf.Region == "" {
 		return nil, fmt.Errorf("Must specify default region in aws.Config")
 	}
 	if h == nil {
@@ -96,8 +97,8 @@ func New(conf *aws.Config, h http.Handler) (*SQSServer, error) {
 	return &SQSServer{
 			Handler:        h,
 			defaultAWSConf: conf,
-			defaultRegion:  *conf.Region,
-			srvByRegion:    map[string]*sqs.SQS{},
+			defaultRegion:  conf.Region,
+			srvByRegion:    map[string]*sqs.Client{},
 			queuePollers:   sync.WaitGroup{},
 		},
 		nil
@@ -183,34 +184,34 @@ func (s *SQSServer) pollQueues(pollctx, taskctx context.Context, queues []QueueC
 			return err
 		}
 		req := &sqs.GetQueueAttributesInput{
-			AttributeNames: []*string{aws.String("VisibilityTimeout")},
+			AttributeNames: []types.QueueAttributeName{("VisibilityTimeout")},
 			QueueUrl:       &q.url,
 		}
-		resp, err := s.sqsSrv(q.QueueConf).GetQueueAttributes(req)
+		resp, err := s.sqsSrv(q.QueueConf).GetQueueAttributes(pollctx, req)
 		if err != nil {
 			return fmt.Errorf("Failed to get queue attributes for '%s' - %s", q.Name, err.Error())
 		}
 		to := resp.Attributes["VisibilityTimeout"]
-		if to == nil {
+		if to == "" {
 			return fmt.Errorf("No visibility timeout returned by SQS for queue '%s'", q.Name)
 		}
-		visTimeout, err := strconv.Atoi(*to)
+		visTimeout, err := strconv.Atoi(to)
 		if err != nil {
-			return fmt.Errorf("Failed to convert visibility timeout from '%s' to int - '%s'", *to, err.Error())
+			return fmt.Errorf("Failed to convert visibility timeout from '%s' to int - '%s'", to, err.Error())
 		}
 		// Each queue runs in a dedicated go routine.
-		go func(vt int64) {
+		go func(vt int32) {
 			s.queuePollers.Add(1)
 			defer s.queuePollers.Done()
 			s.run(pollctx, taskctx, q, vt)
-		}(int64(visTimeout))
+		}(int32(visTimeout))
 	}
 
 	return nil
 }
 
 // run will poll a single queue and handle arriving messages
-func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTimeout int64) {
+func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTimeout int32) {
 	failAttempts := 0
 	backoff := time.Duration(0)
 	for {
@@ -222,17 +223,19 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 				time.Sleep(backoff)
 			}
 
+			attributeNames := []types.QueueAttributeName{}
+			for _, attr := range q.attributesToReturn {
+				attributeNames = append(attributeNames, types.QueueAttributeName(attr))
+			}
 			// Receive only one message at a time to ensure job load is spread over all machines
 			reqInput := &sqs.ReceiveMessageInput{
 				QueueUrl:              &q.url,
-				MaxNumberOfMessages:   aws.Int64(int64(q.ReadBatch)),
-				WaitTimeSeconds:       aws.Int64(20),
-				AttributeNames:        q.attributesToReturn,
+				MaxNumberOfMessages:   int32(q.ReadBatch),
+				WaitTimeSeconds:       20,
+				AttributeNames:        attributeNames,
 				MessageAttributeNames: q.attributesToReturn,
 			}
-			req, resp := s.sqsSrv(q.QueueConf).ReceiveMessageRequest(reqInput)
-			req.HTTPRequest.Cancel = pollctx.Done()
-			err := req.Send()
+			resp, err := s.sqsSrv(q.QueueConf).ReceiveMessage(pollctx, reqInput)
 			if err != nil {
 				q.Metrics(MetricPollFailure, 1, int(atomic.LoadInt32(&q.inprocess)))
 				failAttempts++
@@ -258,7 +261,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 	}
 }
 
-func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, visibilityTimeout int64) {
+func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message, visibilityTimeout int32) {
 	s.tasks.Add(1)
 	defer s.tasks.Done()
 	defer atomic.AddInt32(&q.inprocess, -1)
@@ -267,7 +270,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 
 	// SQS Specific attributes are mapped as X-Amzn-*
 	for k, attr := range m.Attributes {
-		headers.Set(fmt.Sprintf("X-Amzn-%s", k), *attr)
+		headers.Set(fmt.Sprintf("X-Amzn-%s", k), attr)
 	}
 	path := fmt.Sprintf("/%s", q.Name)
 
@@ -307,7 +310,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 			close(done)
 			return
 		case <-time.After(hbeat):
-			err := s.heartbeat(q, m, visibilityTimeout)
+			err := s.heartbeat(ctx, q, m, visibilityTimeout)
 			if err != nil {
 				s.logf("Heartbeat failed - %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 			} else {
@@ -315,7 +318,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m *sqs.Message, 
 			}
 		case <-done:
 			if w.status >= 200 && w.status < 300 {
-				err := s.ack(q, m)
+				err := s.ack(ctx, q, m)
 				if err != nil {
 					s.logf("ACK Failed %s:%s - Cause '%s'", q.Name, *m.MessageId, err.Error())
 					q.Metrics(MetricNack, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
@@ -335,48 +338,44 @@ func (s *SQSServer) getQueue(ctx context.Context, q QueueConf) (*queue, error) {
 	req := &sqs.GetQueueUrlInput{
 		QueueName: &q.Name,
 	}
-	url, err := s.sqsSrv(q).GetQueueUrlWithContext(ctx, req)
+	url, err := s.sqsSrv(q).GetQueueUrl(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get queue %s - '%s'", q.Name, err.Error())
 	}
 	return &queue{
 		QueueConf:          q,
 		url:                *url.QueueUrl,
-		attributesToReturn: []*string{aws.String("All")},
+		attributesToReturn: []string{"All"},
 	}, nil
 }
 
-func (s *SQSServer) ack(q *queue, m *sqs.Message) error {
+func (s *SQSServer) ack(ctx context.Context, q *queue, m types.Message) error {
 	req := &sqs.DeleteMessageInput{
 		QueueUrl:      &q.url,
 		ReceiptHandle: m.ReceiptHandle,
 	}
-	_, err := s.sqsSrv(q.QueueConf).DeleteMessage(req)
+	_, err := s.sqsSrv(q.QueueConf).DeleteMessage(ctx, req)
 	return err
 }
 
-func (s *SQSServer) heartbeat(q *queue, m *sqs.Message, visibilityTimeout int64) error {
+func (s *SQSServer) heartbeat(ctx context.Context, q *queue, m types.Message, visibilityTimeout int32) error {
 	req := &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          &q.url,
 		ReceiptHandle:     m.ReceiptHandle,
-		VisibilityTimeout: aws.Int64(visibilityTimeout),
+		VisibilityTimeout: visibilityTimeout,
 	}
-	_, err := s.sqsSrv(q.QueueConf).ChangeMessageVisibility(req)
+	_, err := s.sqsSrv(q.QueueConf).ChangeMessageVisibility(ctx, req)
 	return err
 }
 
-func (s *SQSServer) sqsSrv(q QueueConf) *sqs.SQS {
+func (s *SQSServer) sqsSrv(q QueueConf) *sqs.Client {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.srvByRegion[q.Region] == nil {
-		aconf := &aws.Config{
-			Region: aws.String(q.Region),
+		aconf := aws.Config{
+			Region: q.Region,
 		}
-		sess, err := session.NewSession(s.defaultAWSConf, aconf)
-		if err != nil {
-			panic(err)
-		}
-		s.srvByRegion[q.Region] = sqs.New(sess, aconf)
+		s.srvByRegion[q.Region] = sqs.NewFromConfig(aconf)
 	}
 	return s.srvByRegion[q.Region]
 }

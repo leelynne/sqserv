@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/leelynne/sqserv"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/leelynne/sqserv/v2"
 )
 
 func Example_basic() {
@@ -25,8 +25,8 @@ func Example_basic() {
 	mux := http.NewServeMux()
 	mux.Handle("/message-queue", http.HandlerFunc(queueHandler))
 
-	conf := &aws.Config{}
-	qsrv, err := sqserv.New(conf.WithRegion("us-west-2"), mux)
+	conf := aws.Config{}
+	qsrv, err := sqserv.New(conf, mux)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,19 +59,19 @@ func Example_withConf() {
 	mux.Handle("/worker-virgina", http.HandlerFunc(queueHandler))
 	mux.Handle("/worker-oregon", http.HandlerFunc(queueHandler))
 
-	conf := &aws.Config{}
-	qsrv, err := sqserv.New(conf.WithRegion("us-west-2"), mux)
+	conf := aws.Config{}
+	qsrv, err := sqserv.New(conf, mux)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Listen to queues from two region
 	queues := []sqserv.QueueConf{
-		sqserv.QueueConf{
+		{
 			Name:   "workers-virginia",
 			Region: "us-east-1",
 		},
-		sqserv.QueueConf{
+		{
 			Name:   "workers-oregon",
 			Region: "us-west-2",
 		},
@@ -121,8 +121,8 @@ func Example_metrics() {
 	mux := http.NewServeMux()
 	mux.Handle("/worker", http.HandlerFunc(queueHandler))
 
-	conf := &aws.Config{}
-	qsrv, err := sqserv.New(conf.WithRegion("us-west-2"), mux)
+	conf := aws.Config{}
+	qsrv, err := sqserv.New(conf, mux)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -148,8 +148,8 @@ func Example_metrics() {
 }
 
 func ExampleNew() {
-	conf := &aws.Config{}
-	qsrv, err := sqserv.New(conf.WithRegion("us-west-2"), nil)
+	conf := aws.Config{}
+	qsrv, err := sqserv.New(conf, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -157,8 +157,8 @@ func ExampleNew() {
 }
 
 func ExampleSQSServer_Shutdown() {
-	conf := &aws.Config{}
-	qsrv, err := sqserv.New(conf.WithRegion("us-west-2"), nil)
+	conf := aws.Config{}
+	qsrv, err := sqserv.New(conf, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
