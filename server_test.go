@@ -1,11 +1,16 @@
 package sqserv
 
-import "testing"
-import "github.com/aws/aws-sdk-go/aws"
+import (
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+)
 
 func TestZeroQueues(t *testing.T) {
-	conf := &aws.Config{}
-	s, err := New(conf.WithRegion("us-west-2"), nil)
+	conf := aws.Config{
+		Region: "us-west-2",
+	}
+	s, err := New(conf, nil)
 	if err != nil {
 		t.Error(err)
 	}
