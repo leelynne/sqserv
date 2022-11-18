@@ -235,6 +235,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 				AttributeNames:        attributeNames,
 				MessageAttributeNames: q.attributesToReturn,
 			}
+
 			resp, err := s.sqsSrv(q.QueueConf).ReceiveMessage(pollctx, reqInput)
 			if err != nil {
 				q.Metrics(MetricPollFailure, 1, int(atomic.LoadInt32(&q.inprocess)))
@@ -248,6 +249,7 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 				backoff = time.Duration(0)
 				failAttempts = 0
 			}
+
 			start := time.Now()
 			inflight := atomic.AddInt32(&q.inprocess, int32(len(resp.Messages)))
 			q.Metrics(MetricReceive, float64(len(resp.Messages)), int(inflight))
@@ -372,9 +374,8 @@ func (s *SQSServer) sqsSrv(q QueueConf) *sqs.Client {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.srvByRegion[q.Region] == nil {
-		aconf := aws.Config{
-			Region: q.Region,
-		}
+		aconf := s.defaultAWSConf
+		aconf.Region = q.Region
 		s.srvByRegion[q.Region] = sqs.NewFromConfig(aconf)
 	}
 	return s.srvByRegion[q.Region]
