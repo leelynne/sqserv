@@ -23,6 +23,7 @@ import (
 
 // MetricType lists each action that generates a MetricCallback
 type MetricType int
+type NackAction int
 
 const (
 	defaultReadBatchSize            = 1    // Size one ensures best load balancing between multiple SQS listeners.
@@ -32,7 +33,40 @@ const (
 	MetricPollFailure                      // Called after failure of an SQS long poll request. val is always 1.
 	MetricReceive                          // Called after a successful batch message receive. val is the number of messages received in the batch.
 	MetricShutdown                         // Called when the the Shutdown method is invoked. val is always 1.
+
+	NackNone   NackAction = iota // No action on nack.
+	NackExtend                   // Extend the visibility timeout to delay the time before the message gets retried.
 )
+
+var (
+	DefaultNackHandler NackHandler = NackHandlerFunc(func(*http.Request) Nack {
+		return Nack{Action: NackNone}
+	})
+)
+
+type Nack struct {
+	Action NackAction
+	// VisibilityTimeout allows setting a visibility timeout when nacking. This delays the time before the message is available for processing.
+	VisibilityTimeout int
+}
+
+type NackHandlerFunc func(msg *http.Request) Nack
+
+func (nh NackHandlerFunc) Handle(msg *http.Request) Nack {
+	return nh(msg)
+}
+
+// NackHandler allows customizing actions for explicit nacking.
+type NackHandler interface {
+	// Handle allows callers to
+	Handle(msg *http.Request) Nack
+}
+
+type Options struct {
+	AWSConf aws.Config
+	Handler http.Handler
+	Nack    NackHandler
+}
 
 // SQSServer handles SQS messages in a similar fashion to http.Server
 type SQSServer struct {
@@ -40,6 +74,7 @@ type SQSServer struct {
 	// errors. If nil, logging goes to os.Stderr
 	ErrorLog       *log.Logger
 	Handler        http.Handler
+	nacker         NackHandler
 	defaultAWSConf aws.Config
 	defaultRegion  string
 
@@ -77,15 +112,23 @@ type queue struct {
 // New creates a new SQSServer. If Handler is nil http.DefaultServeMux is used.
 // Must specify a region in conf that will be the default queue region.
 func New(conf aws.Config, h http.Handler) (*SQSServer, error) {
-	if conf.Region == "" {
+	return NewWithOptions(Options{
+		AWSConf: conf,
+		Handler: h,
+		Nack:    nil,
+	})
+}
+
+func NewWithOptions(opts Options) (*SQSServer, error) {
+	if opts.AWSConf.Region == "" {
 		return nil, fmt.Errorf("Must specify default region in aws.Config")
 	}
-	if h == nil {
-		h = http.DefaultServeMux
+	if opts.Handler == nil {
+		opts.Handler = http.DefaultServeMux
 	}
-	if conf.HTTPClient == nil {
+	if opts.AWSConf.HTTPClient == nil {
 		// For backwards compatibility, set this http client if one is not already set.
-		conf.HTTPClient = &http.Client{
+		opts.AWSConf.HTTPClient = &http.Client{
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
 					Timeout: 3 * time.Second,
@@ -95,9 +138,9 @@ func New(conf aws.Config, h http.Handler) (*SQSServer, error) {
 	}
 
 	return &SQSServer{
-			Handler:        h,
-			defaultAWSConf: conf,
-			defaultRegion:  conf.Region,
+			Handler:        opts.Handler,
+			defaultAWSConf: opts.AWSConf,
+			defaultRegion:  opts.AWSConf.Region,
 			srvByRegion:    map[string]*sqs.Client{},
 			queuePollers:   sync.WaitGroup{},
 		},
@@ -287,6 +330,7 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message,
 	}
 	headers.Set("Content-MD5", *m.MD5OfBody)
 	headers.Set("X-Amzn-MessageID", *m.MessageId)
+	headers.Set("X-Amzn-Receipt-Handle", *m.ReceiptHandle)
 
 	url, _ := url.Parse(path)
 
@@ -328,7 +372,14 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message,
 					q.Metrics(MetricAck, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 				}
 			} else {
+				nack := s.nacker.Handle(req)
 				q.Metrics(MetricNack, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
+				switch nack.Action {
+				case NackExtend:
+					if nack.VisibilityTimeout > 0 {
+						s.heartbeat(ctx, q, m, int32(nack.VisibilityTimeout))
+					}
+				}
 			}
 			close(done)
 			return
@@ -356,6 +407,7 @@ func (s *SQSServer) ack(ctx context.Context, q *queue, m types.Message) error {
 		QueueUrl:      &q.url,
 		ReceiptHandle: m.ReceiptHandle,
 	}
+
 	_, err := s.sqsSrv(q.QueueConf).DeleteMessage(ctx, req)
 	return err
 }
