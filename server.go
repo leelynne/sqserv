@@ -115,7 +115,6 @@ func New(conf aws.Config, h http.Handler) (*SQSServer, error) {
 	return NewWithOptions(Options{
 		AWSConf: conf,
 		Handler: h,
-		Nack:    nil,
 	})
 }
 
@@ -125,6 +124,9 @@ func NewWithOptions(opts Options) (*SQSServer, error) {
 	}
 	if opts.Handler == nil {
 		opts.Handler = http.DefaultServeMux
+	}
+	if opts.Nack == nil {
+		opts.Nack = DefaultNackHandler
 	}
 	if opts.AWSConf.HTTPClient == nil {
 		// For backwards compatibility, set this http client if one is not already set.
