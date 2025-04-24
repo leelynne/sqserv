@@ -47,7 +47,7 @@ var (
 type Nack struct {
 	Action NackAction
 	// VisibilityTimeout allows setting a visibility timeout when nacking. This delays the time before the message is available for processing.
-	VisibilityTimeout int
+	VisibilityTimeoutSeconds int
 }
 
 type NackHandlerFunc func(msg *http.Request) Nack
@@ -378,8 +378,8 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message,
 				q.Metrics(MetricNack, durationMillis(start), int(atomic.LoadInt32(&q.inprocess)))
 				switch nack.Action {
 				case NackExtend:
-					if nack.VisibilityTimeout > 0 {
-						s.heartbeat(ctx, q, m, int32(nack.VisibilityTimeout))
+					if nack.VisibilityTimeoutSeconds > 0 {
+						s.heartbeat(ctx, q, m, int32(nack.VisibilityTimeoutSeconds))
 					}
 				}
 			}
