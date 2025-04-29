@@ -145,6 +145,7 @@ func NewWithOptions(opts Options) (*SQSServer, error) {
 			defaultRegion:  opts.AWSConf.Region,
 			srvByRegion:    map[string]*sqs.Client{},
 			queuePollers:   sync.WaitGroup{},
+			nacker:         opts.Nack,
 		},
 		nil
 }
