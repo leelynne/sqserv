@@ -1,0 +1,6 @@
+
+# LocalStack test data
+.test/
+
+# Beads issue tracker (local only)
+.beads/
