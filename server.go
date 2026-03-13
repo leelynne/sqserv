@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -309,41 +310,69 @@ func (s *SQSServer) run(pollctx, taskctx context.Context, q *queue, visibilityTi
 	}
 }
 
-func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message, visibilityTimeout int32) {
-	s.tasks.Add(1)
-	defer s.tasks.Done()
-	defer atomic.AddInt32(&q.inprocess, -1)
-	start := ctx.Value("start").(time.Time)
+// buildRequest constructs an http.Request from an SQS message.
+// The queue name forms the base URL path; the optional "Path" message attribute
+// is appended after validation to prevent path traversal.
+// SQS system attributes become X-Amzn-* headers; non-binary message attributes
+// become headers directly.
+func buildRequest(ctx context.Context, queueName string, m types.Message, logf func(string, ...interface{})) *http.Request {
 	headers := http.Header{}
 
 	// SQS Specific attributes are mapped as X-Amzn-*
 	for k, attr := range m.Attributes {
 		headers.Set(fmt.Sprintf("X-Amzn-%s", k), attr)
 	}
-	path := fmt.Sprintf("/%s", q.Name)
+	msgPath := fmt.Sprintf("/%s", queueName)
 
 	for k, attr := range m.MessageAttributes {
-		if k == "Path" {
-			path = fmt.Sprintf("%s/%s", path, *attr.StringValue)
+		if attr.StringValue == nil {
 			continue
 		}
-		if *(attr.DataType) != "Binary" {
+		if k == "Path" {
+			candidate := path.Clean(fmt.Sprintf("/%s/%s", queueName, *attr.StringValue))
+			if !strings.HasPrefix(candidate, "/"+queueName+"/") {
+				logf("Rejected invalid Path attribute for queue '%s': %s", queueName, *attr.StringValue)
+				continue
+			}
+			msgPath = candidate
+			continue
+		}
+		if attr.DataType == nil || *attr.DataType != "Binary" {
 			headers.Set(k, *attr.StringValue)
 		}
 	}
-	headers.Set("Content-MD5", *m.MD5OfBody)
-	headers.Set("X-Amzn-MessageID", *m.MessageId)
-	headers.Set("X-Amzn-Receipt-Handle", *m.ReceiptHandle)
+	if m.MD5OfBody != nil {
+		headers.Set("Content-MD5", *m.MD5OfBody)
+	}
+	if m.MessageId != nil {
+		headers.Set("X-Amzn-MessageID", *m.MessageId)
+	}
+	if m.ReceiptHandle != nil {
+		headers.Set("X-Amzn-Receipt-Handle", *m.ReceiptHandle)
+	}
 
-	url, _ := url.Parse(path)
+	u, _ := url.Parse(msgPath)
 
+	body := ""
+	if m.Body != nil {
+		body = *m.Body
+	}
 	req := &http.Request{
-		URL:    url,
+		URL:    u,
 		Method: "POST",
 		Header: headers,
-		Body:   ioutil.NopCloser(strings.NewReader(*m.Body)),
+		Body:   ioutil.NopCloser(strings.NewReader(body)),
 	}
-	req = req.WithContext(ctx)
+	return req.WithContext(ctx)
+}
+
+func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message, visibilityTimeout int32) {
+	s.tasks.Add(1)
+	defer s.tasks.Done()
+	defer atomic.AddInt32(&q.inprocess, -1)
+	start := ctx.Value("start").(time.Time)
+
+	req := buildRequest(ctx, q.Name, m, s.logf)
 
 	done := make(chan struct{})
 	w := &writer{}
