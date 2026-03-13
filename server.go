@@ -95,6 +95,7 @@ type MetricCallback func(m MetricType, val float64, inflight int)
 type QueueConf struct {
 	Name      string
 	Region    string // Region will override the region in the aws.Config passed to New()
+	AccountID string // AccountID is the AWS account ID of the queue owner. 
 	ReadBatch uint   // Size of read batch. Defaults to maximum allows by SQS.
 	Metrics   MetricCallback
 }
@@ -422,6 +423,9 @@ func (s *SQSServer) serveMessage(ctx context.Context, q *queue, m types.Message,
 func (s *SQSServer) getQueue(ctx context.Context, q QueueConf) (*queue, error) {
 	req := &sqs.GetQueueUrlInput{
 		QueueName: &q.Name,
+	}
+	if q.AccountID != "" {
+		req.QueueOwnerAWSAccountId = &q.AccountID
 	}
 	url, err := s.sqsSrv(q).GetQueueUrl(ctx, req)
 	if err != nil {
